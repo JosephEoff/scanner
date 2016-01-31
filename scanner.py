@@ -1,87 +1,109 @@
 import serial
+import io
 import Image
 import time
+import numpy as numpy
+
+class CommunicationsError(Exception):
+    def __init__(self, value):
+        self.value = value
+        
+    def __str__(self):
+        return repr(self.value)
 
 class microwavescanner:
     portname="/dev/ttyUSB0"
-    filename="export.png"
-    serialport=serial.Serial(portname)
-    scanvalues=[]
+    portspeed=115200
+    serialport=serial.Serial(portname,portspeed)
+    scanvalues= numpy.zeros([1,1])
     x_min=0
     x_max=0
+    x_home=0
     y_min=0
     y_max=0
-    step_size=0
+    y_home=0
+    signalstrength_read_count=16
     image_max_value=0
-    image_min_value=100000
+    image_min_value=-1
     image=[]
-    
-    
-    def __init__(self,portname, filename, x_min, x_max, y_min,y_max, stepsize ):
+        
+    def __init__(self,portname, oversampling):
         self.portname=portname
-        self.serialport=serial.Serial(portname)
-        initstring=self.serialport.readline()
-        print "Received: " + initstring
-        if (x_min<x_max):
-            self.x_min=x_min
-            self.x_max=x_max
-        else:
-            self.x_min=x_max
-            self.x_max=x_min
+        self.serialport=serial.Serial(self.portname,self.portspeed)
+        self.x_home=self.RequestValueFromScanner("QHX")
+        self.y_home=self.RequestValueFromScanner("QHY")
+        self.x_max=self.RequestValueFromScanner("QRX")
+        self.y_max=self.RequestValueFromScanner("QRY")
+        self.scanvalues=numpy.zeros([self.x_max,self.y_max])
+        self.signalstrength_read_count=oversampling
+        
+    def RequestValueFromScanner(self,requeststring):
+        valuestring=self.sendcommand(requeststring)
+        return self.GetValueFromString(requeststring,valuestring)
+    
+    def RequestValueFromScanner_Parameter(self,requeststring,parameter):
+        valuestring=self.sendcommand(requeststring+str(parameter))
+        return self.GetValueFromString(requeststring,valuestring)    
+              
             
-        if (y_min<y_max):
-            self.y_min=y_min
-            self.y_max=y_max
-        else:
-            self.y_min=y_max
-            self.y_max=y_min
-        self.step_size=stepsize
-            
-    def GetValueFromString(self,scanstring):
-        value=0
-        #print "Received Analog: " + scanstring
-        if (str.index(scanstring,"A")==0):
-            scanstring=str.strip(scanstring,"A")
+    def GetValueFromString(self,requeststring,scanstring):
+        value=0.0
+        answerstring=str.strip(requeststring,"Q")
+        if (str.index(scanstring,answerstring)==0):
+            scanstring=scanstring.replace( answerstring,"")
             scanstring=str.strip(scanstring)
             value=int(scanstring)
+        else:
+            raise CommunicationsError("Expected Response: " + answerstring + " Received: " + scanstring)
         return value
             
-
     def scan(self):
-        self.scanvalues=[]
+        self.scanvalues=numpy.zeros([self.x_max+1,self.y_max+1])
+        x=self.x_home
+        x_direction=1
+        if self.x_home>0:
+            x_direction=-1
         
-        for x in range(self.x_min , self.x_max,self.step_size):
-            self.serialport.write("X" + str(x) + chr(13))
-            scancolumn=[]
-            for y in range(self.y_max,self.y_min,-1*self.step_size):
-                self.serialport.write("Y" +str(y)+chr(13))
-                value=0
-                for r in range(0,4):
-                    self.serialport.write("R0"+chr(13))
-                    scanstring=self.serialport.readline()
-                    value=value+self.GetValueFromString(scanstring)
-                print "X="+str(x)+"  value="+str(value)
-                scancolumn.append(value)
+        y=self.y_home
+        y_direction=1
+        self.sendcommand("GH")
+        
+        if self.y_home>0:
+            y_direction=-1
+            
+        for xcounter in range(self.x_min+1 , self.x_max+1):
+            self.sendcommand("GX" + str(x))
+            y=self.y_home
+            for ycounter in range(self.y_min,self.y_max+1):
+                self.sendcommand("GY" +str(y))                
+                value=self.RequestValueFromScanner_Parameter("QS",self.signalstrength_read_count)
+                self.scanvalues[x,y]=numpy.double(value)
+                print "X="+str(x)+ " Y="+ str(y) +" value="+str(self.scanvalues[x,y])
+                if (self.image_min_value<0):
+                    self.image_min_value=value
                 if (value>self.image_max_value):
                     self.image_max_value=value
                 if (value<self.image_min_value):
-                    self.image_min_value=value
-            self.scanvalues.append(scancolumn)  
-            for y in range (self.y_min,self.y_max,self.step_size):
-                self.serialport.write("Y" +str(y)+chr(13))
-                time.sleep(0.03)
-
+                    self.image_min_value=value                
+                y=y+y_direction
+                
+            #y_direction=y_direction*-1
+            x=x+x_direction
+    
+    def sendcommand(self,commandstring):
+        self.serialport.write(commandstring+chr(13))
+        return self.serialport.readline()
+        
     def makeimage(self):
-        xlen=len(self.scanvalues)
-        ylen=len(self.scanvalues[0])
-        img=Image.new('RGB',(xlen,ylen),"black")
+
+        img=Image.new('RGB',(self.x_max,self.y_max),"black")
         pixels=img.load()
         
         scale=255.0/(self.image_max_value-self.image_min_value)
         
-        for x in range(0,xlen):
-            for y in range(0,ylen):
-                val=self.scanvalues[x][y]
+        for x in range(0,self.x_max):
+            for y in range(0,self.y_max):
+                val=self.scanvalues[x,y]
                 val=val-self.image_min_value
                 print "X="+str(x) +" Y="+str(y)+ " Value=" +str(val)  
                 val=int(val*scale)
@@ -101,15 +123,19 @@ class microwavescanner:
         self.image.save(filename+"bmp","bmp")
     
     def savedata(self, filename):
-        pass
+        numpy.savetxt(filename,self.scanvalues)
     
     def showimage(self):
         if self.image:
             self.image.show()
+    
+    def park(self):
+        self.sendcommand("GH")
 
 def main():
-    scanner=microwavescanner("/dev/ttyUSB0","testfile",30,150,30,150,1)
+    scanner=microwavescanner("/dev/ttyUSB0",64)
     scanner.scan()
+    scanner.park()
     scanner.makeimage()
     #scanner.saveimage("testfile")
     scanner.savedata("testfile"+".csv")
